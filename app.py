@@ -1,6 +1,9 @@
-import streamlit as st
-import requests
+
+import json
+
 import pandas as pd
+import requests
+import streamlit as st
 
 
 # ---------------------------------------------------------
@@ -10,7 +13,7 @@ import pandas as pd
 st.set_page_config(
     page_title="AI Lead Generator",
     page_icon="🎯",
-    layout="wide"
+    layout="wide",
 )
 
 
@@ -41,42 +44,41 @@ GEMINI_URL = (
 # ---------------------------------------------------------
 
 def fetch_leads(industry, location):
+    """Fetch business leads from Google Maps using SerpApi."""
 
     params = {
         "engine": "google_maps",
         "type": "search",
         "q": f"{industry} in {location}",
         "api_key": SERPAPI_KEY,
-        "hl": "en"
+        "hl": "en",
     }
 
     response = requests.get(
         SERPAPI_URL,
         params=params,
-        timeout=30
+        timeout=30,
     )
 
     response.raise_for_status()
 
     data = response.json()
-
     results = data.get("local_results", [])
 
     leads = []
 
     for result in results[:10]:
-
         lead = {
             "business_name": result.get("title", "N/A"),
             "website": result.get("website", "N/A"),
             "location": result.get("address", location),
             "description": result.get(
                 "description",
-                f"{result.get('type', industry)} business"
+                f"{result.get('type', industry)} business",
             ),
             "business_type": result.get("type", "N/A"),
             "rating": result.get("rating", "N/A"),
-            "reviews": result.get("reviews", "N/A")
+            "reviews": result.get("reviews", "N/A"),
         }
 
         leads.append(lead)
@@ -89,69 +91,51 @@ def fetch_leads(industry, location):
 # ---------------------------------------------------------
 
 def classify_lead(lead, industry):
+    """Classify a business lead as HOT or COLD using Gemini AI."""
 
     prompt = f"""
-You are an AI sales lead classification assistant.
+You are a B2B sales lead qualification expert.
 
-We are looking for potential business leads in the following industry:
+Your task is to classify a business lead as HOT or COLD
+based on its potential relevance to the target industry.
 
-Industry: {industry}
+TARGET INDUSTRY:
+{industry}
 
-Analyze the following business information.
+BUSINESS DETAILS:
+- Business Name: {lead.get("business_name", "N/A")}
+- Website: {lead.get("website", "N/A")}
+- Location: {lead.get("location", "N/A")}
+- Description: {lead.get("description", "N/A")}
+- Business Type: {lead.get("business_type", "N/A")}
+- Rating: {lead.get("rating", "N/A")}
+- Reviews: {lead.get("reviews", "N/A")}
 
-Business Name:
-{lead["business_name"]}
-
-Business Type:
-{lead["business_type"]}
-
-Location:
-{lead["location"]}
-
-Website:
-{lead["website"]}
-
-Description:
-{lead["description"]}
-
-Rating:
-{lead["rating"]}
-
-Number of Reviews:
-{lead["reviews"]}
-
-Classify this business as either:
-
-HOT
-or
-COLD
-
-Use the following general logic:
+CLASSIFICATION RULES:
 
 HOT:
-- Strong relevance to the requested industry
-- Established business presence
-- Clear business activity or commercial potential
-- Good online presence or other positive business signals
+- The business appears highly relevant to the target industry.
+- Available information indicates a plausible potential customer.
+- The business's profile provides a reasonable basis for sales outreach.
 
 COLD:
-- Weak relevance to the industry
-- Limited information
-- Weak business presence
-- Low apparent commercial relevance
+- The business appears unrelated to the target industry.
+- Available information provides insufficient evidence of relevance.
+- The business does not appear to be a plausible prospect.
 
-Important:
-This is a lead-potential classification based only on publicly available business information.
-Do not claim that the business has expressed buying intent.
+IMPORTANT:
+- Do not assume that a business is interested in buying.
+- Do not invent purchasing intent, budget, or business needs.
+- Base your decision only on the information provided.
+- Return exactly one classification: HOT or COLD.
+- Provide a short explanation for your decision.
 
-Return ONLY valid JSON in this exact format:
+Return valid JSON in this format:
 
 {{
     "classification": "HOT",
-    "reason": "Short explanation in one sentence."
+    "reason": "The business appears relevant to the target industry."
 }}
-
-The classification must be exactly HOT or COLD.
 """
 
     payload = {
@@ -159,7 +143,7 @@ The classification must be exactly HOT or COLD.
             {
                 "parts": [
                     {
-                        "text": prompt
+                        "text": prompt,
                     }
                 ]
             }
@@ -172,41 +156,41 @@ The classification must be exactly HOT or COLD.
                 "properties": {
                     "classification": {
                         "type": "STRING",
-                        "enum": ["HOT", "COLD"]
+                        "enum": ["HOT", "COLD"],
                     },
                     "reason": {
-                        "type": "STRING"
-                    }
+                        "type": "STRING",
+                    },
                 },
                 "required": [
                     "classification",
-                    "reason"
-                ]
-            }
-        }
+                    "reason",
+                ],
+            },
+        },
     }
 
     response = requests.post(
         GEMINI_URL,
         headers={
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         },
         params={
-            "key": GEMINI_API_KEY
+            "key": GEMINI_API_KEY,
         },
         json=payload,
-        timeout=60
+        timeout=60,
     )
 
     response.raise_for_status()
 
     data = response.json()
 
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    response_text = (
+        data["candidates"][0]["content"]["parts"][0]["text"]
+    )
 
-    import json
-
-    result = json.loads(text)
+    result = json.loads(response_text)
 
     return result
 
@@ -216,36 +200,35 @@ The classification must be exactly HOT or COLD.
 # ---------------------------------------------------------
 
 def process_leads(leads, industry):
+    """Classify all leads and track processing progress."""
 
     final_results = []
+    total = len(leads)
 
     progress_bar = st.progress(0)
 
-    total = len(leads)
-
     for index, lead in enumerate(leads):
-
         try:
-
             classification = classify_lead(
                 lead,
-                industry
+                industry,
             )
 
             lead["classification"] = classification.get(
                 "classification",
-                "COLD"
+                "COLD",
             )
 
             lead["reason"] = classification.get(
                 "reason",
-                "No reason provided."
+                "No reason provided.",
             )
 
         except Exception as e:
-
             lead["classification"] = "COLD"
-            lead["reason"] = f"LLM classification failed: {str(e)}"
+            lead["reason"] = (
+                f"LLM classification failed: {str(e)}"
+            )
 
         final_results.append(lead)
 
@@ -265,8 +248,8 @@ def process_leads(leads, industry):
 st.title("🎯 AI-Powered Lead Generation & Classification")
 
 st.write(
-    "Generate 10 business leads from Google Maps and use Gemini AI "
-    "to classify each lead as HOT or COLD."
+    "Generate up to 10 business leads from Google Maps "
+    "and use Gemini AI to classify each lead as HOT or COLD."
 )
 
 
@@ -277,24 +260,22 @@ st.write(
 col1, col2 = st.columns(2)
 
 with col1:
-
     industry = st.text_input(
         "🏢 Industry",
-        placeholder="e.g. Solar Companies"
+        placeholder="e.g. Solar Companies",
     )
 
 with col2:
-
     location = st.text_input(
         "📍 Location",
-        placeholder="e.g. Lahore, Pakistan"
+        placeholder="e.g. Lahore, Pakistan",
     )
 
 
 generate_button = st.button(
     "🚀 Generate Leads",
     type="primary",
-    use_container_width=True
+    use_container_width=True,
 )
 
 
@@ -304,8 +285,7 @@ generate_button = st.button(
 
 if generate_button:
 
-    if not industry or not location:
-
+    if not industry.strip() or not location.strip():
         st.warning(
             "Please enter both industry and location."
         )
@@ -314,18 +294,17 @@ if generate_button:
 
         try:
 
-            # Step 1: Fetch leads
+            # STEP 1: FETCH LEADS
+
             with st.spinner(
                 "🔎 Searching for business leads..."
             ):
-
                 leads = fetch_leads(
-                    industry,
-                    location
+                    industry.strip(),
+                    location.strip(),
                 )
 
             if not leads:
-
                 st.error(
                     "No business leads were found. "
                     "Try a different industry or location."
@@ -337,28 +316,26 @@ if generate_button:
                     f"Found {len(leads)} business leads."
                 )
 
-                # Step 2: Classify leads
+                # STEP 2: CLASSIFY LEADS
+
                 with st.spinner(
                     "🤖 Gemini AI is classifying the leads..."
                 ):
-
                     final_results = process_leads(
                         leads,
-                        industry
+                        industry.strip(),
                     )
 
-                # -------------------------------------------------
-                # RESULTS
-                # -------------------------------------------------
+                # -----------------------------------------
+                # RESULTS TABLE
+                # -----------------------------------------
 
                 st.subheader(
                     "📊 Lead Classification Results"
                 )
 
-                # Convert to dataframe
                 df = pd.DataFrame(final_results)
 
-                # Reorder columns
                 df = df[
                     [
                         "business_name",
@@ -369,11 +346,10 @@ if generate_button:
                         "rating",
                         "reviews",
                         "classification",
-                        "reason"
+                        "reason",
                     ]
                 ]
 
-                # Rename columns
                 df.columns = [
                     "Business Name",
                     "Website",
@@ -383,27 +359,28 @@ if generate_button:
                     "Rating",
                     "Reviews",
                     "Classification",
-                    "AI Reason"
+                    "AI Reason",
                 ]
 
-                # Display table
                 st.dataframe(
                     df,
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
                 )
 
-                # -------------------------------------------------
+                # -----------------------------------------
                 # SUMMARY
-                # -------------------------------------------------
+                # -----------------------------------------
 
                 hot_count = sum(
-                    1 for lead in final_results
+                    1
+                    for lead in final_results
                     if lead["classification"] == "HOT"
                 )
 
                 cold_count = sum(
-                    1 for lead in final_results
+                    1
+                    for lead in final_results
                     if lead["classification"] == "COLD"
                 )
 
@@ -414,44 +391,47 @@ if generate_button:
                 with c1:
                     st.metric(
                         "Total Leads",
-                        len(final_results)
+                        len(final_results),
                     )
 
                 with c2:
                     st.metric(
                         "🔥 HOT Leads",
-                        hot_count
+                        hot_count,
                     )
 
                 with c3:
                     st.metric(
                         "❄️ COLD Leads",
-                        cold_count
+                        cold_count,
                     )
 
-                # -------------------------------------------------
-                # DOWNLOAD
-                # -------------------------------------------------
+                # -----------------------------------------
+                # DOWNLOAD RESULTS
+                # -----------------------------------------
 
                 csv = df.to_csv(
-                    index=False
-                ).encode("utf-8")
+                    index=False,
+                ).encode("utf-8-sig")
 
                 st.download_button(
                     label="⬇️ Download Results as CSV",
                     data=csv,
                     file_name="ai_leads.csv",
-                    mime="text/csv"
+                    mime="text/csv",
                 )
 
         except requests.exceptions.HTTPError as e:
-
             st.error(
                 f"API request failed: {e}"
             )
 
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            st.error(
+                f"Network error while contacting an API: {e}"
+            )
 
+        except Exception as e:
             st.error(
                 f"Something went wrong: {e}"
             )
