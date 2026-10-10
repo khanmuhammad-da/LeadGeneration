@@ -1,449 +1,590 @@
 
 import json
+import re
 
 import pandas as pd
 import requests
 import streamlit as st
 
 
-# ---------------------------------------------------------
+# ============================================================
 # PAGE CONFIGURATION
-# ---------------------------------------------------------
+# ============================================================
 
 st.set_page_config(
     page_title="AI Lead Generator",
     page_icon="🎯",
-    layout="wide",
+    layout="wide"
 )
-
-
-# ---------------------------------------------------------
-# API KEYS
-# ---------------------------------------------------------
-
-SERPAPI_KEY = st.secrets["SERPAPI_KEY"]
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-
-
-# ---------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------
 
 SERPAPI_URL = "https://serpapi.com/search.json"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 GEMINI_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent"
+    "https://generativelanguage.googleapis.com/v1beta/"
+    f"models/{GEMINI_MODEL}:generateContent"
 )
 
 
-# ---------------------------------------------------------
-# FUNCTION 1: FETCH LEADS FROM SERPAPI
-# ---------------------------------------------------------
+# ============================================================
+# LOAD API KEYS
+# ============================================================
 
-def fetch_leads(industry, location):
-    """Fetch business leads from Google Maps using SerpApi."""
+try:
+    SERPAPI_KEY = st.secrets["SERPAPI_KEY"]
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+
+except Exception:
+    st.error(
+        "API keys are missing. Configure SERPAPI_KEY and "
+        "GEMINI_API_KEY in your Streamlit Secrets."
+    )
+    st.stop()
+
+
+# ============================================================
+# FUNCTION 1: SEARCH FOR BUSINESS LEADS
+# ============================================================
+
+def search_leads(business_type, location, number_of_leads=10):
+    """
+    Retrieve business information from Google Maps through SerpApi.
+    """
 
     params = {
         "engine": "google_maps",
-        "type": "search",
-        "q": f"{industry} in {location}",
-        "api_key": SERPAPI_KEY,
-        "hl": "en",
+        "q": f"{business_type} in {location}",
+        "api_key": SERPAPI_KEY
     }
 
-    response = requests.get(
-        SERPAPI_URL,
-        params=params,
-        timeout=30,
-    )
+    try:
+        response = requests.get(
+            SERPAPI_URL,
+            params=params,
+            timeout=30
+        )
 
-    response.raise_for_status()
+        response.raise_for_status()
+        data = response.json()
 
-    data = response.json()
-    results = data.get("local_results", [])
+        if data.get("error"):
+            st.error(f"SerpApi error: {data['error']}")
+            return []
 
-    leads = []
+        places = data.get("local_results", [])
+        leads = []
 
-    for result in results[:10]:
-        lead = {
-            "business_name": result.get("title", "N/A"),
-            "website": result.get("website", "N/A"),
-            "location": result.get("address", location),
-            "description": result.get(
-                "description",
-                f"{result.get('type', industry)} business",
-            ),
-            "business_type": result.get("type", "N/A"),
-            "rating": result.get("rating", "N/A"),
-            "reviews": result.get("reviews", "N/A"),
-        }
+        for place in places[:number_of_leads]:
 
-        leads.append(lead)
+            leads.append({
+                "Business Name": place.get("title", "N/A"),
+                "Category": place.get("type", "N/A"),
+                "Address": place.get("address", "N/A"),
+                "Phone": place.get("phone", "N/A"),
+                "Website": place.get("website", ""),
+                "Rating": place.get("rating", "N/A"),
+                "Reviews": place.get("reviews", "N/A"),
+                "Lead Status": "UNCLASSIFIED",
+                "AI Reason": "Not classified yet"
+            })
 
-    return leads
+        return leads
+
+    except requests.exceptions.Timeout:
+        st.error("Business search timed out. Please try again.")
+        return []
+
+    except requests.exceptions.HTTPError as error:
+        st.error(f"SerpApi HTTP error: {error}")
+        return []
+
+    except requests.exceptions.RequestException as error:
+        st.error(f"Business search failed: {error}")
+        return []
+
+    except (ValueError, TypeError):
+        st.error("Could not process the business search results.")
+        return []
 
 
-# ---------------------------------------------------------
-# FUNCTION 2: CLASSIFY LEAD USING GEMINI
-# ---------------------------------------------------------
+# ============================================================
+# FUNCTION 2: CLASSIFY A LEAD USING GEMINI
+# ============================================================
 
-def classify_lead(lead, industry):
-    """Classify a business lead as HOT or COLD using Gemini AI."""
+def classify_lead(lead, target_customer, product_or_service):
+    """
+    Classify a business as HOT, WARM, or COLD based on the
+    specified customer profile and available business information.
+
+    API failures result in UNCLASSIFIED, not COLD.
+    """
 
     prompt = f"""
-You are a B2B sales lead qualification expert.
+You are a B2B sales lead qualification assistant.
 
-Your task is to classify a business lead as HOT or COLD
-based on its potential relevance to the target industry.
+OBJECTIVE
+Evaluate whether this business is a potentially suitable
+prospect for the product or service described below.
 
-TARGET INDUSTRY:
-{industry}
+PRODUCT OR SERVICE:
+{product_or_service}
 
-BUSINESS DETAILS:
-- Business Name: {lead.get("business_name", "N/A")}
-- Website: {lead.get("website", "N/A")}
-- Location: {lead.get("location", "N/A")}
-- Description: {lead.get("description", "N/A")}
-- Business Type: {lead.get("business_type", "N/A")}
-- Rating: {lead.get("rating", "N/A")}
-- Reviews: {lead.get("reviews", "N/A")}
+TARGET CUSTOMER PROFILE:
+{target_customer}
 
-CLASSIFICATION RULES:
+BUSINESS INFORMATION:
+Business name: {lead.get("Business Name", "Unknown")}
+Category: {lead.get("Category", "Unknown")}
+Address: {lead.get("Address", "Unknown")}
+Website: {lead.get("Website", "Unknown")}
+Rating: {lead.get("Rating", "Unknown")}
+Reviews: {lead.get("Reviews", "Unknown")}
+Phone: {lead.get("Phone", "Unknown")}
+
+CLASSIFICATION RULES
 
 HOT:
-- The business appears highly relevant to the target industry.
-- Available information indicates a plausible potential customer.
-- The business's profile provides a reasonable basis for sales outreach.
+The available information provides strong evidence that the
+business matches the target customer profile and is a strong
+prospect for the product or service.
+
+WARM:
+The business appears potentially relevant, but its suitability
+or potential need requires further research.
 
 COLD:
-- The business appears unrelated to the target industry.
-- Available information provides insufficient evidence of relevance.
-- The business does not appear to be a plausible prospect.
+The available information suggests that the business is a poor
+match for the target customer profile.
 
 IMPORTANT:
-- Do not assume that a business is interested in buying.
-- Do not invent purchasing intent, budget, or business needs.
-- Base your decision only on the information provided.
-- Return exactly one classification: HOT or COLD.
-- Provide a short explanation for your decision.
+1. Do not invent information about the business.
+2. Do not claim the business intends to buy without evidence.
+3. A high rating or many reviews alone does not make a lead HOT.
+4. A missing website or phone number alone does not make a lead COLD.
+5. Evaluate relevance to the specified product and customer profile.
+6. If information is limited, use WARM when a plausible match exists.
+7. Base your reason on the available information.
+8. These classifications are preliminary estimates, not verified
+   buying intent.
 
-Return valid JSON in this format:
-
+Return only valid JSON in this format:
 {{
-    "classification": "HOT",
-    "reason": "The business appears relevant to the target industry."
+    "status": "HOT",
+    "reason": "Brief explanation based on available information."
 }}
+
+The status must be exactly HOT, WARM, or COLD.
 """
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
 
     payload = {
         "contents": [
             {
                 "parts": [
                     {
-                        "text": prompt,
+                        "text": prompt
                     }
                 ]
             }
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "classification": {
-                        "type": "STRING",
-                        "enum": ["HOT", "COLD"],
-                    },
-                    "reason": {
-                        "type": "STRING",
-                    },
-                },
-                "required": [
-                    "classification",
-                    "reason",
-                ],
-            },
-        },
+            "responseMimeType": "application/json"
+        }
     }
 
-    response = requests.post(
-        GEMINI_URL,
-        headers={
-            "Content-Type": "application/json",
-        },
-        params={
-            "key": GEMINI_API_KEY,
-        },
-        json=payload,
-        timeout=60,
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    response_text = (
-        data["candidates"][0]["content"]["parts"][0]["text"]
-    )
-
-    result = json.loads(response_text)
-
-    return result
-
-
-# ---------------------------------------------------------
-# FUNCTION 3: PROCESS ALL LEADS
-# ---------------------------------------------------------
-
-def process_leads(leads, industry):
-    """Classify all leads and track processing progress."""
-
-    final_results = []
-    total = len(leads)
-
-    progress_bar = st.progress(0)
-
-    for index, lead in enumerate(leads):
-        try:
-            classification = classify_lead(
-                lead,
-                industry,
-            )
-
-            lead["classification"] = classification.get(
-                "classification",
-                "COLD",
-            )
-
-            lead["reason"] = classification.get(
-                "reason",
-                "No reason provided.",
-            )
-
-        except Exception as e:
-            lead["classification"] = "COLD"
-            lead["reason"] = (
-                f"LLM classification failed: {str(e)}"
-            )
-
-        final_results.append(lead)
-
-        progress_bar.progress(
-            (index + 1) / total
+    try:
+        response = requests.post(
+            GEMINI_URL,
+            headers=headers,
+            json=payload,
+            timeout=45
         )
 
-    progress_bar.empty()
+        response.raise_for_status()
+        data = response.json()
 
-    return final_results
+        candidates = data.get("candidates", [])
+
+        if not candidates:
+            return {
+                "status": "UNCLASSIFIED",
+                "reason": "Gemini returned no classification."
+            }
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        if not parts:
+            return {
+                "status": "UNCLASSIFIED",
+                "reason": "Gemini returned an empty response."
+            }
+
+        ai_text = parts[0].get("text", "").strip()
+
+        # Remove Markdown code fences if returned by the model.
+        ai_text = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            ai_text,
+            flags=re.IGNORECASE
+        ).strip()
+
+        result = json.loads(ai_text)
+
+        status = str(
+            result.get("status", "")
+        ).strip().upper()
+
+        reason = str(
+            result.get("reason", "")
+        ).strip()
+
+        if status not in ["HOT", "WARM", "COLD"]:
+            return {
+                "status": "UNCLASSIFIED",
+                "reason": "Gemini returned an invalid status."
+            }
+
+        if not reason:
+            reason = "No explanation provided."
+
+        return {
+            "status": status,
+            "reason": reason
+        }
+
+    except requests.exceptions.HTTPError:
+        # Do not expose the API key or request URL.
+        try:
+            error_data = response.json()
+            error_message = error_data.get(
+                "error", {}
+            ).get("message", "Gemini API request failed.")
+        except (ValueError, AttributeError):
+            error_message = (
+                f"Gemini returned HTTP {response.status_code}."
+            )
+
+        return {
+            "status": "UNCLASSIFIED",
+            "reason": error_message
+        }
+
+    except requests.exceptions.Timeout:
+        return {
+            "status": "UNCLASSIFIED",
+            "reason": "Gemini request timed out."
+        }
+
+    except requests.exceptions.RequestException:
+        return {
+            "status": "UNCLASSIFIED",
+            "reason": "Network error while contacting Gemini."
+        }
+
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return {
+            "status": "UNCLASSIFIED",
+            "reason": "Could not interpret Gemini's response."
+        }
+
+    except Exception:
+        return {
+            "status": "UNCLASSIFIED",
+            "reason": "Unexpected classification error."
+        }
 
 
-# ---------------------------------------------------------
-# STREAMLIT UI
-# ---------------------------------------------------------
+# ============================================================
+# APPLICATION HEADER
+# ============================================================
 
-st.title("🎯 AI-Powered Lead Generation & Classification")
+st.title("🎯 AI Lead Generator")
 
-st.write(
-    "Generate up to 10 business leads from Google Maps "
-    "and use Gemini AI to classify each lead as HOT or COLD."
+st.markdown(
+    """
+    Discover businesses through Google Maps data and use AI to
+    evaluate how closely each business matches your target customers.
+    """
+)
+
+st.caption(
+    "HOT/WARM/COLD are preliminary AI assessments, "
+    "not confirmation of buying intent."
 )
 
 
-# ---------------------------------------------------------
-# INPUT SECTION
-# ---------------------------------------------------------
+# ============================================================
+# SIDEBAR: SEARCH AND CUSTOMER PROFILE
+# ============================================================
 
-col1, col2 = st.columns(2)
+st.sidebar.header("🔎 Lead Search")
 
-with col1:
-    industry = st.text_input(
-        "🏢 Industry",
-        placeholder="e.g. Solar Companies",
+business_type = st.sidebar.text_input(
+    "Business Type",
+    placeholder="e.g. Software companies"
+)
+
+location = st.sidebar.text_input(
+    "Location",
+    placeholder="e.g. Lahore, Pakistan"
+)
+
+number_of_leads = st.sidebar.slider(
+    "Number of Leads",
+    min_value=1,
+    max_value=20,
+    value=10
+)
+
+st.sidebar.divider()
+
+st.sidebar.header("🎯 Target Customer Profile")
+
+product_or_service = st.sidebar.text_area(
+    "What are you selling?",
+    placeholder=(
+        "e.g. CRM software, digital marketing, "
+        "web development services"
     )
+)
 
-with col2:
-    location = st.text_input(
-        "📍 Location",
-        placeholder="e.g. Lahore, Pakistan",
+target_customer = st.sidebar.text_area(
+    "Which businesses are you targeting?",
+    placeholder=(
+        "e.g. Small and medium-sized businesses "
+        "that need customer management software"
     )
+)
 
+classify_with_ai = st.sidebar.checkbox(
+    "Classify leads using Gemini AI",
+    value=True
+)
 
-generate_button = st.button(
-    "🚀 Generate Leads",
-    type="primary",
+search_button = st.sidebar.button(
+    "🚀 Find Leads",
     use_container_width=True,
+    type="primary"
 )
 
 
-# ---------------------------------------------------------
-# GENERATE RESULTS
-# ---------------------------------------------------------
+# ============================================================
+# SEARCH AND PROCESS LEADS
+# ============================================================
 
-if generate_button:
+if search_button:
 
-    if not industry.strip() or not location.strip():
+    if not business_type.strip():
+        st.warning("Please enter a business type.")
+
+    elif not location.strip():
+        st.warning("Please enter a location.")
+
+    elif classify_with_ai and not product_or_service.strip():
         st.warning(
-            "Please enter both industry and location."
+            "Please describe your product or service so AI "
+            "can evaluate lead relevance."
+        )
+
+    elif classify_with_ai and not target_customer.strip():
+        st.warning(
+            "Please describe your target customer profile."
         )
 
     else:
 
-        try:
+        with st.spinner("Searching Google Maps for businesses..."):
 
-            # STEP 1: FETCH LEADS
+            leads = search_leads(
+                business_type=business_type.strip(),
+                location=location.strip(),
+                number_of_leads=number_of_leads
+            )
 
-            with st.spinner(
-                "🔎 Searching for business leads..."
-            ):
-                leads = fetch_leads(
-                    industry.strip(),
-                    location.strip(),
-                )
+        if not leads:
+            st.warning(
+                "No leads were returned. Try another search "
+                "or check your SerpApi account."
+            )
 
-            if not leads:
-                st.error(
-                    "No business leads were found. "
-                    "Try a different industry or location."
+        else:
+
+            st.success(f"Retrieved {len(leads)} business leads.")
+
+            # ------------------------------------------------
+            # AI CLASSIFICATION
+            # ------------------------------------------------
+
+            if classify_with_ai:
+
+                progress = st.progress(0)
+                progress_text = st.empty()
+
+                total = len(leads)
+
+                for index, lead in enumerate(leads):
+
+                    progress_text.write(
+                        f"Classifying {index + 1}/{total}: "
+                        f"{lead['Business Name']}"
+                    )
+
+                    result = classify_lead(
+                        lead=lead,
+                        target_customer=target_customer,
+                        product_or_service=product_or_service
+                    )
+
+                    lead["Lead Status"] = result["status"]
+                    lead["AI Reason"] = result["reason"]
+
+                    progress.progress(
+                        (index + 1) / total
+                    )
+
+                progress_text.success(
+                    "Classification process completed."
                 )
 
             else:
 
-                st.success(
-                    f"Found {len(leads)} business leads."
-                )
-
-                # STEP 2: CLASSIFY LEADS
-
-                with st.spinner(
-                    "🤖 Gemini AI is classifying the leads..."
-                ):
-                    final_results = process_leads(
-                        leads,
-                        industry.strip(),
+                for lead in leads:
+                    lead["Lead Status"] = "UNCLASSIFIED"
+                    lead["AI Reason"] = (
+                        "AI classification was disabled."
                     )
 
-                # -----------------------------------------
-                # RESULTS TABLE
-                # -----------------------------------------
+            # ------------------------------------------------
+            # DATAFRAME
+            # ------------------------------------------------
 
-                st.subheader(
-                    "📊 Lead Classification Results"
-                )
+            df = pd.DataFrame(leads)
 
-                df = pd.DataFrame(final_results)
+            # ------------------------------------------------
+            # SUMMARY METRICS
+            # ------------------------------------------------
 
-                df = df[
-                    [
-                        "business_name",
-                        "website",
-                        "location",
-                        "description",
-                        "business_type",
-                        "rating",
-                        "reviews",
-                        "classification",
-                        "reason",
-                    ]
+            st.subheader("📊 Lead Summary")
+
+            hot_count = int(
+                (df["Lead Status"] == "HOT").sum()
+            )
+
+            warm_count = int(
+                (df["Lead Status"] == "WARM").sum()
+            )
+
+            cold_count = int(
+                (df["Lead Status"] == "COLD").sum()
+            )
+
+            unclassified_count = int(
+                (df["Lead Status"] == "UNCLASSIFIED").sum()
+            )
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            col1.metric("🔥 HOT", hot_count)
+            col2.metric("🌤️ WARM", warm_count)
+            col3.metric("❄️ COLD", cold_count)
+            col4.metric("⚠️ UNCLASSIFIED", unclassified_count)
+
+            # ------------------------------------------------
+            # FILTER RESULTS
+            # ------------------------------------------------
+
+            st.subheader("📋 Business Leads")
+
+            status_filter = st.multiselect(
+                "Filter by lead status",
+                options=[
+                    "HOT",
+                    "WARM",
+                    "COLD",
+                    "UNCLASSIFIED"
+                ],
+                default=[
+                    "HOT",
+                    "WARM",
+                    "COLD",
+                    "UNCLASSIFIED"
                 ]
-
-                df.columns = [
-                    "Business Name",
-                    "Website",
-                    "Location",
-                    "Description",
-                    "Business Type",
-                    "Rating",
-                    "Reviews",
-                    "Classification",
-                    "AI Reason",
-                ]
-
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                # -----------------------------------------
-                # SUMMARY
-                # -----------------------------------------
-
-                hot_count = sum(
-                    1
-                    for lead in final_results
-                    if lead["classification"] == "HOT"
-                )
-
-                cold_count = sum(
-                    1
-                    for lead in final_results
-                    if lead["classification"] == "COLD"
-                )
-
-                st.subheader("📈 Summary")
-
-                c1, c2, c3 = st.columns(3)
-
-                with c1:
-                    st.metric(
-                        "Total Leads",
-                        len(final_results),
-                    )
-
-                with c2:
-                    st.metric(
-                        "🔥 HOT Leads",
-                        hot_count,
-                    )
-
-                with c3:
-                    st.metric(
-                        "❄️ COLD Leads",
-                        cold_count,
-                    )
-
-                # -----------------------------------------
-                # DOWNLOAD RESULTS
-                # -----------------------------------------
-
-                csv = df.to_csv(
-                    index=False,
-                ).encode("utf-8-sig")
-
-                st.download_button(
-                    label="⬇️ Download Results as CSV",
-                    data=csv,
-                    file_name="ai_leads.csv",
-                    mime="text/csv",
-                )
-
-        except requests.exceptions.HTTPError as e:
-            st.error(
-                f"API request failed: {e}"
             )
 
-        except requests.exceptions.RequestException as e:
-            st.error(
-                f"Network error while contacting an API: {e}"
+            filtered_df = df[
+                df["Lead Status"].isin(status_filter)
+            ]
+
+            st.dataframe(
+                filtered_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Website": st.column_config.LinkColumn(
+                        "Website",
+                        display_text="Open Website"
+                    )
+                }
             )
 
-        except Exception as e:
-            st.error(
-                f"Something went wrong: {e}"
+            # ------------------------------------------------
+            # DOWNLOAD CSV
+            # ------------------------------------------------
+
+            csv_data = filtered_df.to_csv(
+                index=False
+            ).encode("utf-8-sig")
+
+            st.download_button(
+                label="⬇️ Download Leads as CSV",
+                data=csv_data,
+                file_name="ai_generated_leads.csv",
+                mime="text/csv"
             )
 
+            # ------------------------------------------------
+            # EXPLAIN CLASSIFICATION
+            # ------------------------------------------------
 
-# ---------------------------------------------------------
-# FOOTER
-# ---------------------------------------------------------
+            with st.expander(
+                "ℹ️ How are HOT, WARM, and COLD determined?"
+            ):
 
-st.divider()
+                st.markdown(
+                    """
+                    **HOT:** Strong evidence of a match with your
+                    target customer profile.
 
-st.caption(
-    "Lead data: SerpApi / Google Maps | "
-    "Classification: Google Gemini"
-)
+                    **WARM:** Potential match, but more research is
+                    needed.
+
+                    **COLD:** Available information suggests a poor
+                    match with your target customer profile.
+
+                    **UNCLASSIFIED:** The API failed or the AI did
+                    not return a valid classification.
+
+                    **Important:** Google Maps information does not
+                    establish a business's budget, purchasing plans,
+                    or actual interest. Verify promising leads before
+                    contacting them.
+                    """
+                )
+
+else:
+
+    st.info(
+        "👈 Enter a business type, location, product/service, "
+        "and target customer profile. Then click **Find Leads**."
+    )
